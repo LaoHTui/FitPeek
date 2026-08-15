@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python sources
+        run: python -m py_compile app.py analysis_window.py fits_reader.py header_compare.py light_curve.py table_model.py
+
+      - name: Run tests
+        run: |
+          python smoke_test.py
+          python ui_smoke_test.py

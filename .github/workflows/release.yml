@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build portable package
+        shell: pwsh
+        run: .\build.ps1 -PythonPath python
+
+      - name: Write checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash FitPeek_Portable.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  FitPeek_Portable.zip" | Set-Content FitPeek_Portable.zip.sha256 -Encoding ascii
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            FitPeek_Portable.zip `
+            FitPeek_Portable.zip.sha256 `
+            --generate-notes `
+            --title "FitPeek ${{ github.ref_name }}"

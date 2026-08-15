@@ -1,0 +1,38 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# PyInstaller and release artifacts
+build/
+dist/
+*.spec
+FitPeek_Portable.zip
+*.sha256
+
+# Local FITS data (tests create their own temporary samples)
+*.fits
+*.fit
+*.fits.gz
+*.evt
+*.pha
+*.rsp
+*.rsp2
+*.rm
+
+# Local QA output and settings
+*_qa.png
+lightcurve_*.png
+*.ini
+*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
