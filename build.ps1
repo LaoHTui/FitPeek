@@ -49,6 +49,7 @@ try {
         --exclude-module astropy.nddata --exclude-module astropy.samp `
         --exclude-module astropy.vo `
         --icon (Join-Path $root 'assets\fitpeek.ico') `
+        --version-file (Join-Path $root 'assets\windows-version-info.txt') `
         --add-data "$(Join-Path $root 'assets\fitpeek.ico');assets" `
         --add-data "$(Join-Path $root 'assets\fitpeek.png');assets" app.py
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }

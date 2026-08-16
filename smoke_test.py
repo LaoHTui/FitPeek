@@ -19,6 +19,11 @@ def create_sample(out):
     out = Path(out)
     primary = fits.PrimaryHDU()
     primary.header["TELESCOP"] = "FITPEEK-TEST"
+    primary.header["INSTRUME"] = "FP-INSTRUMENT"
+    primary.header["DETNAM"] = "FP-DETECTOR"
+    primary.header["OBJECT"] = "TEST-SOURCE"
+    primary.header["OBS_ID"] = "FP-0001"
+    primary.header["TIMESYS"] = "TT"
     primary.header["TRIGTIME"] = 1000.25
     ebounds = fits.BinTableHDU.from_columns([
         fits.Column(name="CHANNEL", format="I", array=np.arange(4, dtype=np.int16)),
@@ -65,6 +70,9 @@ def main():
             "energy_high": 10.0,
         }
         result = compute_light_curve(out, config)
+        assert result["metadata"]["detectors"] == ["FP-DETECTOR"]
+        assert result["metadata"]["energy_unit"] == "keV"
+        assert result["metadata"]["selected_hdus"] == [{"index": 3, "name": "EVENTS"}]
         assert len(result["events"]) == 4
         assert int(result["counts"].sum()) == 4
         assert len(result["counts"]) == 110

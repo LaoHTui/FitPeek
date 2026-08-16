@@ -6,16 +6,20 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QFont, QIcon
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QFileDialog, QHeaderView,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFrame, QGridLayout, QHeaderView,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QPushButton, QSpinBox, QSplitter, QStatusBar, QStyle, QTabWidget, QTableView,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
     QWidget,
 )
 
+from app_info import (
+    APP_AUTHOR, APP_COPYRIGHT, APP_DESCRIPTION, APP_LICENSE, APP_NAME,
+    APP_REPOSITORY, APP_VERSION,
+)
 from table_model import FitsTableModel, TableFilterProxyModel
 
-APP_NAME = "FitPeek"
 ORG_NAME = "FitPeek"
 MAX_PREVIEW_ROWS = 5000
 MAX_SCIENCE_ROWS = 10000
@@ -70,6 +74,76 @@ class ResponsiveTableView(QTableView):
 def resource_path(relative_path):
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
     return base / relative_path
+
+
+class AboutDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"About {APP_NAME}")
+        self.setWindowIcon(QIcon(str(resource_path("assets/fitpeek.png"))))
+        self.setMinimumWidth(500)
+        self.setModal(True)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 24, 26, 20)
+        root.setSpacing(16)
+
+        heading = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(QIcon(str(resource_path("assets/fitpeek.png"))).pixmap(72, 72))
+        logo.setFixedSize(72, 72)
+        heading.addWidget(logo, 0, Qt.AlignTop)
+        heading.addSpacing(16)
+
+        heading_text = QVBoxLayout()
+        title = QLabel(APP_NAME)
+        title_font = title.font()
+        title_font.setPointSize(20)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        self.version_label = QLabel(f"Version {APP_VERSION}")
+        description = QLabel(APP_DESCRIPTION)
+        description.setWordWrap(True)
+        heading_text.addWidget(title)
+        heading_text.addWidget(self.version_label)
+        heading_text.addSpacing(3)
+        heading_text.addWidget(description)
+        heading.addLayout(heading_text, 1)
+        root.addLayout(heading)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        root.addWidget(separator)
+
+        details = QGridLayout()
+        details.setHorizontalSpacing(18)
+        details.setVerticalSpacing(10)
+        details.addWidget(QLabel("Author"), 0, 0)
+        self.author_label = QLabel(APP_AUTHOR)
+        self.author_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        details.addWidget(self.author_label, 0, 1)
+        details.addWidget(QLabel("Copyright"), 1, 0)
+        copyright_label = QLabel(APP_COPYRIGHT)
+        copyright_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        details.addWidget(copyright_label, 1, 1)
+        details.addWidget(QLabel("License"), 2, 0)
+        details.addWidget(QLabel(APP_LICENSE), 2, 1)
+        details.addWidget(QLabel("Source"), 3, 0)
+        self.repository_label = QLabel(f"<a href='{APP_REPOSITORY}'>{APP_REPOSITORY}</a>")
+        self.repository_label.setOpenExternalLinks(True)
+        self.repository_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        details.addWidget(self.repository_label, 3, 1)
+        details.setColumnStretch(1, 1)
+        root.addLayout(details)
+
+        notice = QLabel("This software is provided under the MIT License without warranty.")
+        notice.setWordWrap(True)
+        root.addWidget(notice)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
 
 
 class MainWindow(QMainWindow):
@@ -127,6 +201,11 @@ class MainWindow(QMainWindow):
             self.theme_group.addAction(action)
             self.theme_menu.addAction(action)
             self.theme_actions[mode] = action
+
+        self.about_menu = self.menuBar().addMenu("About")
+        about_action = QAction("About FitPeek...", self)
+        about_action.triggered.connect(self.show_about)
+        self.about_menu.addAction(about_action)
 
         self.tree = SessionTree()
         self.tree.setHeaderLabels(["FITS session"])
@@ -288,6 +367,12 @@ class MainWindow(QMainWindow):
         if persist:
             self.settings.setValue("theme", mode)
             self.settings.sync()
+
+    def create_about_dialog(self):
+        return AboutDialog(self)
+
+    def show_about(self, _checked=False):
+        self.create_about_dialog().exec()
 
     def open_light_curve(self):
         if not self.reader:
@@ -890,6 +975,8 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(ORG_NAME)
     app.setWindowIcon(QIcon(str(resource_path("assets/fitpeek.png"))))
     initial_paths = list(sys.argv[1:])

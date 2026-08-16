@@ -11,6 +11,8 @@ Header comparison, and dedicated GTI and EBOUNDS views.
 Use Delete while the session tree is focused to remove a file from the
 session without deleting it from disk. Choose View -> Theme to use the
 system, light, or dark Qt color scheme.
+Choose About -> About FitPeek to view the version, author, copyright,
+license, and source repository.
 
 Right-click a file or HDU in the session tree to open a light curve window,
 start a Header comparison, copy the file path, expand or collapse the file,

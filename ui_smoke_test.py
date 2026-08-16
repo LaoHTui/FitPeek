@@ -11,8 +11,8 @@ from PySide6.QtCore import QMimeData, QPointF, QSettings, Qt, QUrl
 from PySide6.QtGui import QDropEvent, QStandardItemModel
 from PySide6.QtWidgets import QApplication, QToolBar
 
-from app import MainWindow, ResponsiveTableView
-from analysis_window import ExportWorker, LightCurveWindow
+from app import APP_AUTHOR, APP_NAME, APP_REPOSITORY, APP_VERSION, MainWindow, ResponsiveTableView
+from analysis_window import ExportWorker, LightCurveWindow, _chart_title
 from light_curve import compute_light_curve
 from smoke_test import create_sample
 
@@ -31,6 +31,14 @@ def main():
         assert not window.findChildren(QToolBar)
         file_actions = {action.text() for action in window.file_menu.actions()}
         assert {"Open", "Remove selected file from session"} <= file_actions
+        assert [action.text() for action in window.menuBar().actions()] == ["File", "View", "About"]
+        assert {action.text() for action in window.about_menu.actions()} == {"About FitPeek..."}
+        about = window.create_about_dialog()
+        assert about.windowTitle() == f"About {APP_NAME}"
+        assert about.version_label.text() == f"Version {APP_VERSION}"
+        assert about.author_label.text() == APP_AUTHOR
+        assert APP_REPOSITORY in about.repository_label.text()
+        about.close()
         mime_data = QMimeData()
         mime_data.setUrls([QUrl.fromLocalFile(os.fspath(first))])
         drop_event = QDropEvent(QPointF(10, 10), Qt.CopyAction, mime_data, Qt.LeftButton, Qt.NoModifier)
@@ -108,7 +116,11 @@ def main():
         assert analysis.chart_view.chart().series()
         chart = analysis.chart_view.chart()
         series_points = chart.series()[0].points()
-        assert chart.title() == ""
+        assert "Light curve" in chart.title()
+        assert "Detector: FP-DETECTOR" in chart.title()
+        assert "DT: 0.01 s" in chart.title()
+        assert "Energy: 2 to 10 keV" in chart.title()
+        assert "Poisson 1-sigma" in chart.title()
         assert len(series_points) == len(analysis_result["counts"]) * 2
         assert any(
             series_points[index].x() == series_points[index + 1].x()
@@ -132,6 +144,7 @@ def main():
         ExportWorker("lightcurve", light_curve_txt, analysis_result).run()
         assert os.path.getsize(events_csv) > 0
         assert os.path.getsize(light_curve_txt) > 0
+        assert "Detector: FP-DETECTOR" in open(light_curve_txt, encoding="utf-8").read()
         assert analysis.chart_view.grab().save(image_png)
         assert os.path.getsize(image_png) > 0
 
@@ -155,6 +168,7 @@ def main():
         assert analysis.preview_point_count < dense_count
         assert analysis.preview_error_count <= 500
         assert analysis.trigger_item is not None
+        assert "full bins end" not in _chart_title(dense_result, "counts")
         analysis.close()
 
         events_item = first_root.child(3)

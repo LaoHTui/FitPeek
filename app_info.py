@@ -1,0 +1,7 @@
+APP_NAME = "FitPeek"
+APP_VERSION = "0.1.0"
+APP_AUTHOR = "LaoHTui"
+APP_COPYRIGHT = "Copyright (c) 2026 LaoHTui"
+APP_LICENSE = "MIT License"
+APP_REPOSITORY = "https://github.com/LaoHTui/FitPeek"
+APP_DESCRIPTION = "Read-only FITS inspection and quick-look timing analysis for Windows."

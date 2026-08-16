@@ -33,8 +33,9 @@ FitPeek 不会修改原始 FITS 文件。
 - 光变曲线：支持多个独立窗口，以及同一文件重复打开对比。
 - 事件筛选：支持时间范围、DT、GTI、能段、FLAG 和 EVT_TYPE。
 - 阶梯直方图预览：保留 Poisson 误差棒、T0 标记和稠密数据保峰降采样。
-- 导出事件、完整光变数据和 PNG/JPEG 图像。
+- 导出事件、完整光变数据和 PNG/JPEG 图像；图像内嵌时间窗、DT、能段、探测器、筛选条件和误差定义。
 - 浅色、深色和跟随系统主题。
+- About 页面显示软件版本、作者署名、版权、许可证和源码地址。
 - Windows FITS 文件关联脚本。
 
 支持的常见扩展名包括：`.fits`、`.fit`、`.fits.gz`、`.evt`、`.pha`、`.rsp`、`.rsp2` 和 `.rm`。
@@ -105,12 +106,14 @@ py -3.12 -m venv .venv
 - 表格筛选、排序和选中行导出只作用于当前预览窗口，最多 5,000 行。
 - 稠密光变曲线只在屏幕预览时降采样；导出的数组保持完整。
 - 能段换算依赖 EBOUNDS，或事件表中的直接 ENERGY 列。
+- 光变曲线图中的探测器、仪器、目标和观测编号直接取自 FITS Header；缺失字段会明确标记，而不会推断。
 
 ### 项目结构
 
 ```text
 FitPeek/
 |-- app.py                 主窗口与 Session 管理
+|-- app_info.py            软件版本、作者与项目元数据
 |-- analysis_window.py     光变曲线窗口和导出
 |-- light_curve.py         光变曲线计算
 |-- fits_reader.py         只读 FITS 访问
@@ -163,6 +166,7 @@ FitPeek never modifies the source FITS file.
 - Step-histogram previews with Poisson error bars, a T0 marker, and peak-preserving display downsampling.
 - Event, full light-curve data, and PNG/JPEG image export.
 - System, light, and dark themes.
+- An About page with version, author, copyright, license, and source information.
 - Optional Windows file-association scripts.
 
 Common supported extensions include `.fits`, `.fit`, `.fits.gz`, `.evt`, `.pha`, `.rsp`, `.rsp2`, and `.rm`.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 from pathlib import Path
 
@@ -607,7 +608,10 @@ class LightCurveWindow(QDialog):
         chart.setBackgroundBrush(QBrush(QColor("white")))
         chart.setPlotAreaBackgroundBrush(QBrush(QColor("white")))
         chart.setPlotAreaBackgroundVisible(True)
-        chart.setMargins(QMargins(10, 2, 10, 8))
+        chart.setMargins(QMargins(12, 6, 12, 8))
+        chart.setTitle(_chart_title(self.result, mode))
+        chart.setTitleBrush(QBrush(QColor("#202124")))
+        chart.setTitleFont(QFont("Segoe UI", 9))
         chart.addSeries(series)
         chart.legend().hide()
         axis_x = QValueAxis()
@@ -752,17 +756,97 @@ def _ensure_extension(path, selected_filter):
 
 def _text_header(result, columns):
     config = result["config"]
+    metadata = result.get("metadata", {})
+    detector = ", ".join(metadata.get("detectors", [])) or "not specified"
+    hdus = ", ".join(
+        f"[{item['index']}] {item['name']}" for item in metadata.get("selected_hdus", [])
+    ) or str(config["hdu_indices"])
+    energy = _energy_text(result)
     return "\n".join([
         "FitPeek light curve export",
         f"Source: {result['path']}",
-        f"Selected HDUs: {config['hdu_indices']}",
+        f"Object: {metadata.get('object') or 'not specified'}",
+        f"Observation ID: {metadata.get('obs_id') or 'not specified'}",
+        f"Telescope: {metadata.get('telescope') or 'not specified'}",
+        f"Instrument: {metadata.get('instrument') or 'not specified'}",
+        f"Detector: {detector}",
+        f"Selected HDUs: {hdus}",
         f"Time range: {config['time_start']} to {config['time_end']} s",
         f"Full-bin range: {result.get('effective_time_start')} to {result.get('effective_time_end')} s",
+        f"Time reference: {'relative to TRIGTIME' if result.get('relative_time') else 'FITS TIME'}",
+        f"Time system: {metadata.get('time_system') or 'not specified'}",
         f"Omitted partial tail: {result.get('excluded_tail', 0.0)} s",
         f"DT: {config['dt']} s",
-        f"Energy range: {config['energy_low']} to {config['energy_high']}",
+        f"Energy selection: {energy}",
+        f"GTI filter: {'applied' if config.get('use_gti') else 'off'}",
         f"FLAG filter: {config.get('flag_value') if config.get('filter_flag') else 'off'}",
         f"EVT_TYPE filter: {config.get('evt_type_value') if config.get('filter_evt_type') else 'off'}",
         f"Total filtered events: {len(result['events'])}",
+        "Uncertainty: Poisson 1-sigma (sqrt(N)); no background subtraction",
         columns,
     ])
+
+
+def _chart_title(result, mode):
+    config = result["config"]
+    metadata = result.get("metadata", {})
+    source_name = metadata.get("object") or Path(result["path"]).name
+    obs_id = metadata.get("obs_id")
+    heading = f"{source_name} - Light curve"
+    if obs_id:
+        heading += f" (OBS_ID {obs_id})"
+
+    observatory = " / ".join(
+        value for value in (metadata.get("telescope"), metadata.get("instrument")) if value
+    ) or "not specified"
+    detector = ", ".join(metadata.get("detectors", [])) or "not specified"
+    hdus = ", ".join(
+        f"[{item['index']}] {item['name']}" for item in metadata.get("selected_hdus", [])
+    ) or ", ".join(str(index) for index in config["hdu_indices"])
+
+    requested_start = _format_number(config["time_start"])
+    requested_end = _format_number(config["time_end"])
+    time_reference = "relative to TRIGTIME" if result.get("relative_time") else "FITS TIME"
+    time_system = metadata.get("time_system")
+    if time_system and not result.get("relative_time"):
+        time_reference += f" ({time_system})"
+    time_text = f"Time: {requested_start} to {requested_end} s, {time_reference}"
+    excluded_tail = float(result.get("excluded_tail", 0.0) or 0.0)
+    if excluded_tail > 1e-10:
+        effective_end = _format_number(result["effective_time_end"])
+        time_text += f"; full bins end at {effective_end} s"
+
+    identity_line = f"Observatory: {observatory}  |  Detector: {detector}  |  HDU: {hdus}"
+    selection_line = (
+        f"{time_text}  |  DT: {_format_number(config['dt'])} s  |  Energy: {_energy_text(result)}"
+    )
+    filter_parts = ["GTI applied" if config.get("use_gti") else "GTI off"]
+    if config.get("filter_flag"):
+        filter_parts.append(f"FLAG={config.get('flag_value')}")
+    if config.get("filter_evt_type"):
+        filter_parts.append(f"EVT_TYPE={config.get('evt_type_value')}")
+    quantity = "Raw counts" if mode == "counts" else "Raw count rate"
+    note_line = (
+        f"{'  |  '.join(filter_parts)}  |  N={len(result['events']):,} events  |  "
+        f"{quantity}; Poisson 1-sigma errors; no background subtraction"
+    )
+    return (
+        "<div align='center'>"
+        f"<span style='font-size:11pt; font-weight:600'>{html.escape(heading)}</span><br>"
+        f"<span style='font-size:8.5pt'>{html.escape(identity_line)}</span><br>"
+        f"<span style='font-size:8.5pt'>{html.escape(selection_line)}</span><br>"
+        f"<span style='font-size:8pt; color:#555555'>{html.escape(note_line)}</span>"
+        "</div>"
+    )
+
+
+def _energy_text(result):
+    config = result["config"]
+    if not config.get("apply_energy"):
+        return "unfiltered"
+    unit = result.get("metadata", {}).get("energy_unit") or "unit not specified"
+    return f"{_format_number(config['energy_low'])} to {_format_number(config['energy_high'])} {unit}"
+
+
+def _format_number(value):
+    return f"{float(value):.8g}"

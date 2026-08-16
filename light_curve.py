@@ -37,6 +37,7 @@ def compute_light_curve(path, config, cancelled=lambda: False, progress=lambda v
         allowed_channels = _allowed_channels(hdul, config)
         gti_intervals = _gti_intervals(hdul, time_offset) if config.get("use_gti") else []
         indices = [int(index) for index in config["hdu_indices"]]
+        metadata = _observation_metadata(hdul, indices, config)
         for position, index in enumerate(indices):
             if cancelled():
                 raise AnalysisCancelled("Cancelled")
@@ -100,8 +101,71 @@ def compute_light_curve(path, config, cancelled=lambda: False, progress=lambda v
         "effective_time_start": start,
         "effective_time_end": effective_end,
         "excluded_tail": excluded_tail,
+        "metadata": metadata,
         "config": dict(config),
     }
+
+
+def _observation_metadata(hdul, indices, config):
+    """Collect provenance for display/export without inventing missing values."""
+    selected_hdus = []
+    detector_names = []
+    energy_units = []
+    for index in indices:
+        if index < 0 or index >= len(hdul):
+            continue
+        hdu = hdul[index]
+        selected_hdus.append({"index": index, "name": str(getattr(hdu, "name", "") or f"HDU {index}")})
+        detector = hdu.header.get("DETNAM") or hdu.header.get("DETECTOR")
+        if detector not in (None, ""):
+            detector_names.append(str(detector).strip())
+        columns = getattr(hdu, "columns", None)
+        if config.get("apply_energy") and columns is not None:
+            lookup = {str(name).upper(): position for position, name in enumerate(columns.names or [])}
+            if "ENERGY" in lookup:
+                unit = getattr(columns[lookup["ENERGY"]], "unit", None)
+                if unit:
+                    energy_units.append(str(unit).strip())
+
+    if config.get("apply_energy") and not energy_units:
+        try:
+            ebounds = hdul["EBOUNDS"]
+            lookup = {str(name).upper(): position for position, name in enumerate(ebounds.columns.names or [])}
+            for column_name in ("E_MIN", "E_MAX"):
+                if column_name in lookup:
+                    unit = getattr(ebounds.columns[lookup[column_name]], "unit", None)
+                    if unit:
+                        energy_units.append(str(unit).strip())
+        except (KeyError, IndexError, AttributeError):
+            pass
+
+    global_detector = _first_header_value(hdul, "DETNAM", "DETECTOR")
+    if not detector_names and global_detector not in (None, ""):
+        detector_names.append(str(global_detector).strip())
+    return {
+        "object": _first_header_value(hdul, "OBJECT", "SRC_NAME"),
+        "obs_id": _first_header_value(hdul, "OBS_ID", "OBSID"),
+        "telescope": _first_header_value(hdul, "TELESCOP"),
+        "instrument": _first_header_value(hdul, "INSTRUME"),
+        "detectors": _unique_nonempty(detector_names),
+        "selected_hdus": selected_hdus,
+        "energy_unit": "/".join(_unique_nonempty(energy_units)),
+        "time_system": _first_header_value(hdul, "TIMESYS"),
+        "date_obs": _first_header_value(hdul, "DATE-OBS"),
+    }
+
+
+def _first_header_value(hdul, *keywords):
+    for hdu in hdul:
+        for keyword in keywords:
+            value = hdu.header.get(keyword)
+            if value not in (None, ""):
+                return str(value).strip()
+    return ""
+
+
+def _unique_nonempty(values):
+    return list(dict.fromkeys(value for value in values if value))
 
 
 def _allowed_channels(hdul, config):
