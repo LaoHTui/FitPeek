@@ -13,10 +13,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -39,14 +39,21 @@ jobs:
         run: |
           $releaseVersion = $env:GITHUB_REF_NAME -replace '^v', ''
           $notesFile = "RELEASE_NOTES_$releaseVersion.md"
-          $releaseArgs = @(
-            "release", "create", $env:GITHUB_REF_NAME,
-            "FitPeek_Portable.zip", "FitPeek_Portable.zip.sha256",
-            "--title", "FitPeek $env:GITHUB_REF_NAME"
-          )
-          if (Test-Path -LiteralPath $notesFile) {
-            $releaseArgs += @("--notes-file", $notesFile)
+          if (gh release view $env:GITHUB_REF_NAME 2>$null) {
+            gh release upload $env:GITHUB_REF_NAME `
+              FitPeek_Portable.zip `
+              FitPeek_Portable.zip.sha256 `
+              --clobber
           } else {
-            $releaseArgs += "--generate-notes"
+            $releaseArgs = @(
+              "release", "create", $env:GITHUB_REF_NAME,
+              "FitPeek_Portable.zip", "FitPeek_Portable.zip.sha256",
+              "--title", "FitPeek $env:GITHUB_REF_NAME"
+            )
+            if (Test-Path -LiteralPath $notesFile) {
+              $releaseArgs += @("--notes-file", $notesFile)
+            } else {
+              $releaseArgs += "--generate-notes"
+            }
+            gh @releaseArgs
           }
-          gh @releaseArgs
