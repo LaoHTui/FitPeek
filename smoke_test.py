@@ -8,7 +8,7 @@ import numpy as np
 from astropy.io import fits
 
 from fits_reader import FITSReader
-from light_curve import compute_light_curve
+from light_curve import compute_light_curve, fit_linear_background
 
 
 def digest(path):
@@ -44,6 +44,15 @@ def create_sample(out):
     return out
 
 
+def create_wide_sample(out):
+    out = Path(out)
+    events = fits.BinTableHDU.from_columns([
+        fits.Column(name="TIME", format="D", array=np.arange(0.0, 100.0, 0.1)),
+    ], name="EVENTS")
+    fits.HDUList([fits.PrimaryHDU(), events]).writeto(out, overwrite=True)
+    return out
+
+
 def main():
     with tempfile.TemporaryDirectory() as test_dir:
         out = create_sample(Path(test_dir) / "test_sample.fits")
@@ -76,6 +85,42 @@ def main():
         assert len(result["events"]) == 4
         assert int(result["counts"].sum()) == 4
         assert len(result["counts"]) == 110
+        assert np.isnan(result["background_rate"]).all()
+        assert not result["background_fit"]["performed"]
+        background_result = compute_light_curve(out, dict(config, background_fit=True, background_windows=[]))
+        assert background_result["background_fit"]["performed"]
+        assert len(background_result["background_fit"]["windows_s"]) == 2
+        assert np.isfinite(background_result["background_rate"]).all()
+        assert np.isfinite(background_result["net_rate_error"]).all()
+        wide = create_wide_sample(Path(test_dir) / "wide.fits")
+        wide_result = compute_light_curve(wide, {
+            "hdu_indices": [1], "time_start": 10.0, "time_end": 15.0, "dt": 0.5,
+            "relative_time": False, "use_gti": False, "filter_flag": False,
+            "filter_evt_type": False, "apply_energy": False, "background_fit": True,
+            "background_automatic": True, "background_windows": [],
+        })
+        full_width = 99.9
+        expected_edge_width = full_width * 0.2
+        first_window, last_window = wide_result["background_fit"]["windows_s"]
+        assert np.isclose(first_window[0], 0.0)
+        assert np.isclose(last_window[1], 99.9)
+        assert np.isclose(first_window[1] - first_window[0], expected_edge_width)
+        assert np.isclose(last_window[1] - last_window[0], expected_edge_width)
+        assert len(wide_result["events"]) == 50
+        assert len(wide_result["counts"]) == 10
+        synthetic_x = np.arange(20, dtype=float) + 0.5
+        synthetic_counts = np.full(20, 5.0)
+        synthetic_counts[0:4] = 80.0
+        synthetic_counts[-4:] = 70.0
+        synthetic_background = fit_linear_background(
+            synthetic_x,
+            synthetic_counts,
+            np.sqrt(synthetic_counts),
+            1.0,
+            {"background_fit": True, "background_windows": [], "time_start": 0.0, "time_end": 20.0},
+        )
+        assert synthetic_background["fit"]["performed"]
+        assert synthetic_background["fit"]["warnings"]
         rejected = dict(config, flag_value=1)
         assert len(compute_light_curve(out, rejected)["events"]) == 0
         partial = dict(

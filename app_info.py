@@ -1,5 +1,5 @@
 APP_NAME = "FitPeek"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2"
 APP_AUTHOR = "LaoHTui"
 APP_COPYRIGHT = "Copyright (c) 2026 LaoHTui"
 APP_LICENSE = "MIT License"

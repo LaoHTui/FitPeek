@@ -48,6 +48,9 @@ try {
         --exclude-module astropy.timeseries --exclude-module astropy.stats `
         --exclude-module astropy.nddata --exclude-module astropy.samp `
         --exclude-module astropy.vo `
+        --exclude-module astropy.io.misc.tests `
+        --exclude-module astropy.io.fits.tests --exclude-module astropy.units.tests `
+        --exclude-module astropy.table.tests --exclude-module astropy.time.tests `
         --icon (Join-Path $root 'assets\fitpeek.ico') `
         --version-file (Join-Path $root 'assets\windows-version-info.txt') `
         --add-data "$(Join-Path $root 'assets\fitpeek.ico');assets" `
@@ -57,5 +60,28 @@ try {
     Copy-Item (Join-Path $root 'Register-FitPeek.ps1'), (Join-Path $root 'Bind-FitPeek.cmd'), (Join-Path $root 'README.txt') -Destination $distDir -Force
     if (Test-Path 'FitPeek_Portable.zip') { Remove-Item 'FitPeek_Portable.zip' -Force }
     Compress-Archive -Path (Join-Path $distDir '*') -DestinationPath (Join-Path $root 'FitPeek_Portable.zip')
+
+    # Also refresh the standalone executable kept at dist\FitPeek.exe.
+    & $python -m PyInstaller --noconfirm --clean --onefile --windowed --name FitPeek `
+        --distpath (Join-Path $root 'dist') `
+        --workpath (Join-Path $root 'build\FitPeek-Standalone') `
+        --specpath (Join-Path $root 'build') `
+        --exclude-module pandas --exclude-module matplotlib --exclude-module scipy `
+        --exclude-module openpyxl --exclude-module lxml --exclude-module PIL `
+        --exclude-module astropy.visualization --exclude-module astropy.coordinates `
+        --exclude-module astropy.wcs --exclude-module astropy.cosmology `
+        --exclude-module astropy.modeling --exclude-module astropy.convolution `
+        --exclude-module astropy.timeseries --exclude-module astropy.stats `
+        --exclude-module astropy.nddata --exclude-module astropy.samp `
+        --exclude-module astropy.vo `
+        --exclude-module astropy.io.misc.tests `
+        --exclude-module astropy.io.fits.tests --exclude-module astropy.units.tests `
+        --exclude-module astropy.table.tests --exclude-module astropy.time.tests `
+        --icon (Join-Path $root 'assets\fitpeek.ico') `
+        --version-file (Join-Path $root 'assets\windows-version-info.txt') `
+        --add-data "$(Join-Path $root 'assets\fitpeek.ico');assets" `
+        --add-data "$(Join-Path $root 'assets\fitpeek.png');assets" app.py
+    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller standalone build failed.' }
 } finally { Pop-Location }
 Write-Host "Built $root\dist\FitPeek\FitPeek.exe"
+Write-Host "Built $root\dist\FitPeek.exe"

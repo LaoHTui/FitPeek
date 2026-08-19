@@ -42,6 +42,8 @@ FitPeek 不会修改原始 FITS 文件。
 
 ### 下载与安装
 
+当前稳定版本：**0.2.0**。相对于 0.1 的详细变更见 [CHANGELOG.md](CHANGELOG.md)。
+
 1. 打开本仓库的 **Releases** 页面。
 2. 下载 `FitPeek_Portable.zip`。
 3. 将 ZIP 完整解压到一个新文件夹。

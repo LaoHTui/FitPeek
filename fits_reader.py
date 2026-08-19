@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 import os
 
+import numpy as np
+
 try:  # Keep import errors useful when running the build bootstrapper.
     from astropy.io import fits
 except Exception:  # pragma: no cover - exercised only without astropy
@@ -336,6 +338,34 @@ class FITSReader:
 
     def read_rows(self, hdu_index: int, start: int = 0, count: int = 100) -> list[tuple[Any, ...]]:
         return self.read_table_rows(hdu_index, start, count)
+
+    def time_bounds(self, hdu_indices=None, relative_to_trigtime=False):
+        """Return the finite TIME bounds across selected event HDUs."""
+        if self._hdulist is None and self.open_error is None:
+            self.load()
+        indices = list(hdu_indices) if hdu_indices is not None else range(len(self._hdulist or []))
+        values = []
+        for index in indices:
+            if index < 0 or index >= len(self._hdulist or []):
+                continue
+            data = getattr(self._hdulist[index], "data", None)
+            names = {str(name).upper(): name for name in (getattr(data, "names", []) or [])}
+            if data is None or "TIME" not in names:
+                continue
+            times = np.asarray(data[names["TIME"]], dtype=np.float64)
+            times = times[np.isfinite(times)]
+            if times.size:
+                values.append((float(np.min(times)), float(np.max(times))))
+        if not values:
+            return None
+        start = min(value[0] for value in values)
+        end = max(value[1] for value in values)
+        if relative_to_trigtime:
+            trigtime = next((hdu.header.get("TRIGTIME") for hdu in self._hdulist if hdu.header.get("TRIGTIME") is not None), None)
+            if trigtime is not None:
+                start -= float(trigtime)
+                end -= float(trigtime)
+        return start, end
 
     @staticmethod
     def parse_card(card: HeaderCard | str) -> tuple[str, Any, str]:

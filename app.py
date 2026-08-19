@@ -27,6 +27,7 @@ MAX_RECENT_FILES = 10
 SUPPORTED_EXTENSIONS = {".fits", ".fit", ".fits.gz", ".evt", ".pha", ".rsp", ".rsp2", ".rm"}
 ROLE_PATH = int(Qt.UserRole)
 ROLE_HDU = ROLE_PATH + 1
+FONT_SCALES = (80, 90, 100, 110, 125, 150)
 
 
 class SessionTree(QTreeWidget):
@@ -98,7 +99,7 @@ class AboutDialog(QDialog):
         heading_text = QVBoxLayout()
         title = QLabel(APP_NAME)
         title_font = title.font()
-        title_font.setPointSize(20)
+        title_font.setPointSizeF(20 * getattr(parent, "font_scale", 100) / 100.0)
         title_font.setBold(True)
         title.setFont(title_font)
         self.version_label = QLabel(f"Version {APP_VERSION}")
@@ -153,6 +154,19 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(resource_path("assets/fitpeek.png"))))
         self.resize(1360, 820)
         self.settings = settings or QSettings(ORG_NAME, APP_NAME)
+        application = QApplication.instance()
+        base_size = application.property("fitpeekBaseFontPointSize") if application else None
+        if not base_size:
+            base_size = QApplication.font().pointSizeF()
+            if base_size <= 0:
+                base_size = 9.0
+            if application:
+                application.setProperty("fitpeekBaseFontPointSize", base_size)
+        self._base_font_point_size = float(base_size)
+        self.font_scale = int(self.settings.value("fontScale", 100))
+        if self.font_scale not in FONT_SCALES:
+            self.font_scale = 100
+        self.apply_font_scale(self.font_scale, persist=False)
         self.readers = {}
         self.roots = {}
         self.reader = None
@@ -201,6 +215,20 @@ class MainWindow(QMainWindow):
             self.theme_group.addAction(action)
             self.theme_menu.addAction(action)
             self.theme_actions[mode] = action
+
+        self.font_menu = self.view_menu.addMenu("Font Size")
+        self.font_group = QActionGroup(self)
+        self.font_group.setExclusive(True)
+        self.font_actions = {}
+        for scale in FONT_SCALES:
+            label = f"{scale}%" + (" (Default)" if scale == 100 else "")
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked=False, value=scale: self.apply_font_scale(value))
+            self.font_group.addAction(action)
+            self.font_menu.addAction(action)
+            self.font_actions[scale] = action
+        self.font_actions[self.font_scale].setChecked(True)
 
         self.about_menu = self.menuBar().addMenu("About")
         about_action = QAction("About FitPeek...", self)
@@ -368,6 +396,24 @@ class MainWindow(QMainWindow):
             self.settings.setValue("theme", mode)
             self.settings.sync()
 
+    def apply_font_scale(self, scale, persist=True):
+        scale = int(scale)
+        if scale not in FONT_SCALES:
+            scale = 100
+        self.font_scale = scale
+        font = QFont(QApplication.font())
+        font.setPointSizeF(self._base_font_point_size * scale / 100.0)
+        QApplication.setFont(font)
+        if hasattr(self, "font_actions"):
+            self.font_actions[scale].setChecked(True)
+        if hasattr(self, "header_raw"):
+            self.header_raw.setFont(QFont("Consolas", max(7, round(10 * scale / 100))))
+        for window in getattr(self, "analysis_windows", []):
+            window.set_font_scale(scale)
+        if persist:
+            self.settings.setValue("fontScale", scale)
+            self.settings.sync()
+
     def create_about_dialog(self):
         return AboutDialog(self)
 
@@ -396,7 +442,9 @@ class MainWindow(QMainWindow):
         window.activateWindow()
         return window
 
-    def open_header_compare(self):
+    def open_header_compare(self, selected_item=None):
+        if not isinstance(selected_item, QTreeWidgetItem):
+            selected_item = None
         sources = []
         for key, root in self.roots.items():
             reader = self.ensure_reader(key, root)
@@ -410,7 +458,13 @@ class MainWindow(QMainWindow):
         from header_compare import HeaderCompareWindow
 
         current = None
-        if self.reader:
+        if selected_item is not None:
+            root = selected_item if selected_item.parent() is None else selected_item.parent()
+            selected_path = root.data(0, ROLE_PATH)
+            selected_hdu = selected_item.data(0, ROLE_HDU)
+            if selected_path:
+                current = (Path(str(selected_path)), int(selected_hdu) if selected_hdu is not None else 0)
+        elif self.reader:
             current = (self.reader.path, self.current_hdu if self.current_hdu is not None else 0)
         window = HeaderCompareWindow(sources, current, self)
         self.header_windows.append(window)
@@ -636,7 +690,9 @@ class MainWindow(QMainWindow):
             self.style().standardIcon(QStyle.SP_FileDialogDetailedView), "Compare FITS Headers..."
         )
         compare_action.setEnabled(bool(reader))
-        compare_action.triggered.connect(self.open_header_compare)
+        compare_action.triggered.connect(
+            lambda _checked=False, selected=item: self.open_header_compare(selected)
+        )
         menu.addSeparator()
 
         expand_action = menu.addAction("Collapse File" if root.isExpanded() else "Expand File")
@@ -667,10 +723,33 @@ class MainWindow(QMainWindow):
             return
         root = items[0] if items[0].parent() is None else items[0].parent()
         path = root.data(0, ROLE_PATH)
-        reader = self.readers.pop(self._key(path), None)
+        path_key = self._key(path)
+        related_windows = [
+            window for window in self.analysis_windows
+            if any(self._key(entry["path"]) == path_key for entry in window.source_entries)
+        ]
+        if any(window.analysis_thread is not None or window.export_thread is not None for window in related_windows):
+            QMessageBox.information(
+                self,
+                "File in use",
+                "Wait for the light-curve analysis or export using this FITS file to finish, then remove it.",
+            )
+            return
+        for window in related_windows:
+            window.close()
+        # Analysis settings are keyed by the normalized source path. Removing a
+        # session source also removes its saved light-curve configuration so a
+        # later reopen starts cleanly with defaults.
+        try:
+            from analysis_window import light_curve_settings_key
+            self.settings.remove(light_curve_settings_key(path))
+            self.settings.sync()
+        except (ImportError, TypeError, ValueError):
+            pass
+        reader = self.readers.pop(path_key, None)
         if reader:
             reader.close()
-        self.roots.pop(self._key(path), None)
+        self.roots.pop(path_key, None)
         self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(root))
         self.reader = None
         self.current_hdu = None

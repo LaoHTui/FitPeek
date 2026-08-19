@@ -34,11 +34,31 @@ class HeaderCompareWindow(QDialog):
         root.addLayout(source_row)
 
         if left_source:
-            left_index = self.left_combo.findData((str(left_source[0]), left_source[1]))
+            left_identity = (str(left_source[0]), int(left_source[1]))
+            left_index = next(
+                (
+                    index for index in range(self.left_combo.count())
+                    if tuple(self.left_combo.itemData(index)) == left_identity
+                ),
+                -1,
+            )
             if left_index >= 0:
                 self.left_combo.setCurrentIndex(left_index)
+        else:
+            left_index = 0
+            self.left_combo.setCurrentIndex(left_index)
+
         if self.right_combo.count() > 1:
-            self.right_combo.setCurrentIndex((self.left_combo.currentIndex() + 1) % self.right_combo.count())
+            # Prefer a different FITS path, then fall back to the next HDU.
+            left_identity = self.left_combo.currentData()
+            right_index = next(
+                (
+                    index for index in range(self.right_combo.count())
+                    if self.right_combo.itemData(index)[0] != left_identity[0]
+                ),
+                (self.left_combo.currentIndex() + 1) % self.right_combo.count(),
+            )
+            self.right_combo.setCurrentIndex(right_index)
 
         filter_row = QHBoxLayout()
         self.search = QLineEdit()
