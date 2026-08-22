@@ -394,7 +394,8 @@ class BackgroundFitDialog(QDialog):
 
 class LightCurveWindow(QDialog):
     def __init__(self, reader, parent=None):
-        super().__init__(parent, Qt.Window)
+        super().__init__(None, Qt.Window)
+        self.host_window = parent
         self.reader = reader
         self.settings = getattr(parent, "settings", None)
         self.source_entries = []
@@ -404,6 +405,7 @@ class LightCurveWindow(QDialog):
         self.background_default_intervals = True
         self.background_file_bounds = None
         self.background_fit_signature = None
+        self._auto_time_window = True
         self._setting_restore = False
         self.font_scale = getattr(parent, "font_scale", 100)
         self.result = None
@@ -416,8 +418,14 @@ class LightCurveWindow(QDialog):
         self.chart_resize_timer.setInterval(150)
         self.chart_resize_timer.timeout.connect(self.refresh_chart)
         self.setWindowTitle(f"Light Curve - {reader.path.name}")
+        self.setMinimumSize(760, 560)
         self.resize(880, 660)
         self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowFlags(
+            Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
         self._build_ui()
         self._load_defaults()
 
@@ -477,6 +485,8 @@ class LightCurveWindow(QDialog):
         grid = QGridLayout()
         self.time_start = self._number_box(-1e15, 1e15, 6)
         self.time_end = self._number_box(-1e15, 1e15, 6)
+        self.time_start.valueChanged.connect(self._mark_time_window_manual)
+        self.time_end.valueChanged.connect(self._mark_time_window_manual)
         self.dt = self._number_box(1e-6, 1e9, 6)
         self.dt.setValue(0.01)
         self.dt.valueChanged.connect(self._mark_background_stale)
@@ -541,6 +551,15 @@ class LightCurveWindow(QDialog):
         self.y_mode.currentIndexChanged.connect(self.refresh_chart)
         grid.addWidget(QLabel("Preview Y"), 1, 2)
         grid.addWidget(self.y_mode, 1, 3)
+
+        self.time_column = QComboBox()
+        self.time_column.setToolTip("Select the event-table column used as time")
+        grid.addWidget(QLabel("Time column"), 0, 4)
+        grid.addWidget(self.time_column, 0, 5)
+        self.data_column = QComboBox()
+        self.data_column.setToolTip("Select the numeric event column to aggregate; Event count preserves the original behavior")
+        grid.addWidget(QLabel("Plot column"), 1, 4)
+        grid.addWidget(self.data_column, 1, 5)
 
         background_row = QHBoxLayout()
         self.background_button = QPushButton("Background...")
@@ -607,6 +626,25 @@ class LightCurveWindow(QDialog):
         box.setKeyboardTracking(False)
         return box
 
+    @staticmethod
+    def _is_plot_column(field, time_column):
+        name = str(field.name).upper()
+        if name == str(time_column or "TIME").upper():
+            return False
+        if any(token in name for token in ("DEAD", "EVT_PAIR", "GAIN_TYPE", "EVT_TYPE", "FLAG", "QUALITY", "STATUS", "ERROR", "ERR")):
+            return False
+        if getattr(field, "variable_length", False) or str(field.dimensions or "").strip():
+            return False
+        fmt = str(field.format or "").upper().strip()
+        if fmt and fmt[0] not in "BIJKEFD":
+            return False
+        pytype = str(field.python_type or "").lower()
+        return not pytype or any(token in pytype for token in ("int", "float", "double", "numeric"))
+
+    def _mark_time_window_manual(self, *_):
+        if not self._setting_restore and not getattr(self, "_updating_time_window", False):
+            self._auto_time_window = False
+
     def _set_all_events(self, state):
         self.event_list.blockSignals(True)
         for row in range(self.event_list.count()):
@@ -634,9 +672,26 @@ class LightCurveWindow(QDialog):
             self.run_button.setEnabled(bool(selected))
 
     def _load_defaults(self):
+        def global_default(key, fallback):
+            if self.settings is None:
+                return fallback
+            value = self.settings.value(f"lightCurveDefaults/{key}", fallback)
+            if isinstance(fallback, bool):
+                return str(value).lower() in ("1", "true", "yes", "on")
+            try:
+                return type(fallback)(value)
+            except (TypeError, ValueError):
+                return fallback
+
+        self._pre_trigger_percent = max(0.0, min(100.0, global_default("pre_trigger_percent", 10.0)))
+        self._post_trigger_percent = max(0.0, min(100.0, global_default("post_trigger_percent", 40.0)))
+        self.dt.setValue(max(1e-6, global_default("dt", 0.01)))
+        self.background_enabled = global_default("background_fit", True)
+        y_index = self.y_mode.findData(global_default("y_mode", "counts"))
+        self.y_mode.setCurrentIndex(max(0, y_index))
         self.source_entries = [{"path": str(self.reader.path), "reader": self.reader}]
         self._rebuild_event_list()
-        candidates = [info for info in self.reader.infos if info.is_table and "TIME" in {field.name.upper() for field in info.fields} and not info.display_name.upper().startswith("GTI")]
+        candidates = [info for info in self.reader.infos if info.is_table and any("TIME" in field.name.upper() and not any(token in field.name.upper() for token in ("ERROR", "ERR", "START", "STOP")) for field in info.fields) and not info.display_name.upper().startswith("GTI")]
         available_columns = {field.name.upper() for info in candidates for field in info.fields}
         self._update_event_summary()
         has_flag = "FLAG" in available_columns
@@ -648,31 +703,86 @@ class LightCurveWindow(QDialog):
         self.filter_evt_type.setChecked(has_evt_type)
         self.evt_type_value.setEnabled(has_evt_type)
 
-        trigtime = self.reader.header_value("TRIGTIME")
-        self.trigtime = float(trigtime) if trigtime is not None else None
-        self.relative_time.setEnabled(trigtime is not None)
+        trigger_info = self.reader.trigger_time_info()
+        self.trigtime = trigger_info.get("value")
+        self.relative_time.setEnabled(self.trigtime is not None)
         self.relative_time.blockSignals(True)
-        self.relative_time.setChecked(trigtime is not None)
+        self.relative_time.setChecked(self.trigtime is not None and global_default("relative_time", True))
         self.relative_time.blockSignals(False)
         gti_index = self.reader.find_hdu("GTI")
         self.use_gti.setEnabled(gti_index is not None)
-        self.use_gti.setChecked(gti_index is not None)
-        time_start, time_end = (-30.0, 60.0)
+        self.use_gti.setChecked(gti_index is not None and global_default("use_gti", True))
+        available_time_columns = sorted({field.name for info in candidates for field in info.fields if "TIME" in field.name.upper() and not any(token in field.name.upper() for token in ("ERROR", "ERR", "START", "STOP"))})
+        self.time_column.blockSignals(True)
+        self.time_column.clear()
+        self.time_column.addItems(available_time_columns or ["TIME"])
+        preferred_index = self.time_column.findText("TIME", Qt.MatchFixedString)
+        self.time_column.setCurrentIndex(max(0, preferred_index))
+        self.time_column.blockSignals(False)
+        numeric_columns = sorted({
+            field.name for info in candidates for field in info.fields
+            if self._is_plot_column(field, self.time_column.currentText())
+        })
+        self.data_column.blockSignals(True)
+        self.data_column.clear()
+        self.data_column.addItem("Event count", "__count__")
+        for name in numeric_columns:
+            self.data_column.addItem(name, name)
+        self.data_column.blockSignals(False)
+        bounds_parts = []
+        for entry in self.source_entries:
+            indices = [info.index for info in entry["reader"].infos if info.is_table and any("TIME" in field.name.upper() for field in info.fields) and not info.display_name.upper().startswith("GTI")]
+            bounds = entry["reader"].time_bounds(indices, relative_to_trigtime=bool(self.trigtime is not None and self.relative_time.isChecked()), time_column=self.time_column.currentText())
+            if bounds is not None:
+                bounds_parts.append(bounds)
+        if bounds_parts:
+            full_start = min(value[0] for value in bounds_parts)
+            full_end = max(value[1] for value in bounds_parts)
+            # Defaults are relative to trigger: use 10% of the complete
+            # coverage before T0 and 40% after T0, clamped to real data.
+            if self.trigtime is not None and self.relative_time.isChecked():
+                # Percentages are based on the complete observation coverage
+                # after converting the bounds to the trigger-relative axis.
+                duration = max(0.0, float(full_end) - float(full_start))
+                time_start = max(full_start, -self._pre_trigger_percent / 100.0 * duration)
+                time_end = min(full_end, self._post_trigger_percent / 100.0 * duration)
+                if not np.isfinite(time_start) or not np.isfinite(time_end) or time_start >= time_end:
+                    time_start, time_end = full_start, full_end
+            else:
+                time_start, time_end = full_start, full_end
+        else:
+            time_start, time_end = (0.0, 1.0)
+        self._auto_time_window = True
+        self.time_start.blockSignals(True)
+        self.time_end.blockSignals(True)
         self.time_start.setValue(time_start)
         self.time_end.setValue(time_end)
+        self.time_start.blockSignals(False)
+        self.time_end.blockSignals(False)
         self._initialize_background_windows(candidates)
 
         ebounds_index = self.reader.find_hdu("EBOUNDS")
         direct_energy = any("ENERGY" in {field.name.upper() for field in info.fields} for info in candidates)
         energy_available = ebounds_index is not None or direct_energy
+        self._direct_energy_available = bool(direct_energy and ebounds_index is None)
         self.apply_energy.setEnabled(energy_available)
-        self.apply_energy.setChecked(energy_available)
+        self.apply_energy.setChecked(energy_available and global_default("apply_energy", True))
         if ebounds_index is not None:
             fields = [field.name.upper() for field in self.reader.table_schema(ebounds_index)]
             rows = self.reader.read_table_rows(ebounds_index, 0, min(10000, self.reader.infos[ebounds_index].rows or 0))
             if rows and "E_MIN" in fields and "E_MAX" in fields:
                 self.energy_low.setValue(min(float(row[fields.index("E_MIN")]) for row in rows))
                 self.energy_high.setValue(max(float(row[fields.index("E_MAX")]) for row in rows))
+        elif direct_energy:
+            bounds = [self.reader.table_column_bounds(info.index, "ENERGY") for info in candidates]
+            bounds = [value for value in bounds if value is not None]
+            if bounds:
+                self.energy_low.setValue(min(value[0] for value in bounds))
+                self.energy_high.setValue(max(value[1] for value in bounds))
+                self.apply_energy.setToolTip("Range automatically detected from the event table ENERGY column")
+            else:
+                self.apply_energy.setChecked(False)
+                self.apply_energy.setToolTip("ENERGY exists but has no readable finite values; filtering is disabled")
         self.energy_low.setEnabled(energy_available)
         self.energy_high.setEnabled(energy_available)
         self._restore_analysis_settings()
@@ -689,7 +799,7 @@ class LightCurveWindow(QDialog):
             reader = entry["reader"]
             for info in reader.infos:
                 names = {field.name.upper() for field in info.fields}
-                if not info.is_table or "TIME" not in names or info.display_name.upper().startswith("GTI"):
+                if not info.is_table or not any("TIME" in name and not any(token in name for token in ("ERROR", "ERR", "START", "STOP")) for name in names) or info.display_name.upper().startswith("GTI"):
                     continue
                 item = QListWidgetItem(f"{Path(entry['path']).name} [{info.index}] {info.display_name}")
                 item.setData(Qt.UserRole, info.index)
@@ -720,7 +830,7 @@ class LightCurveWindow(QDialog):
         tables = []
         for info in reader.infos:
             names = tuple(field.name.upper() for field in info.fields)
-            if info.is_table and "TIME" in names and not info.display_name.upper().startswith("GTI"):
+            if info.is_table and any("TIME" in name and not any(token in name for token in ("ERROR", "ERR", "START", "STOP")) for name in names) and not info.display_name.upper().startswith("GTI"):
                 fields = tuple((field.name.upper(), str(field.format).upper(), str(field.unit).upper()) for field in info.fields)
                 tables.append((info.display_name.upper(), fields))
         return identity, tuple(tables)
@@ -881,11 +991,12 @@ class LightCurveWindow(QDialog):
         for entry in self.source_entries:
             indices = [
                 info.index for info in entry["reader"].infos
-                if info.is_table and "TIME" in {field.name.upper() for field in info.fields}
+                if info.is_table and any("TIME" in field.name.upper() and not any(token in field.name.upper() for token in ("ERROR", "ERR", "START", "STOP")) for field in info.fields)
                 and not info.display_name.upper().startswith("GTI")
             ]
             bounds = entry["reader"].time_bounds(
                 indices, relative_to_trigtime=self.relative_time.isChecked(),
+                time_column=self.time_column.currentText(),
             )
             if bounds is not None:
                 bounds_parts.append(bounds)
@@ -919,7 +1030,8 @@ class LightCurveWindow(QDialog):
             return
         self._setting_restore = True
         try:
-            if self.relative_time.isEnabled() and "relative_time" in saved:
+            manual_window = saved.get("time_window_mode") == "manual"
+            if manual_window and self.relative_time.isEnabled() and "relative_time" in saved:
                 self.relative_time.setChecked(bool(saved["relative_time"]))
             for widget, key in (
                 (self.use_gti, "use_gti"),
@@ -928,16 +1040,38 @@ class LightCurveWindow(QDialog):
             ):
                 if widget.isEnabled() and key in saved:
                     widget.setChecked(bool(saved[key]))
-            self.time_start.setValue(float(saved.get("time_start", -30.0)))
-            self.time_end.setValue(float(saved.get("time_end", 60.0)))
+            if manual_window:
+                self._updating_time_window = True
+                try:
+                    self.time_start.setValue(float(saved["time_start"]))
+                    self.time_end.setValue(float(saved["time_end"]))
+                finally:
+                    self._updating_time_window = False
+                self._auto_time_window = False
             self.dt.setValue(float(saved.get("dt", self.dt.value())))
             self.flag_value.setValue(int(saved.get("flag_value", self.flag_value.value())))
             self.evt_type_value.setValue(int(saved.get("evt_type_value", self.evt_type_value.value())))
-            self.energy_low.setValue(float(saved.get("energy_low", self.energy_low.value())))
-            self.energy_high.setValue(float(saved.get("energy_high", self.energy_high.value())))
+            saved_low = float(saved.get("energy_low", self.energy_low.value()))
+            saved_high = float(saved.get("energy_high", self.energy_high.value()))
+            invalid_legacy_energy = (
+                getattr(self, "_direct_energy_available", False)
+                and saved_low == 0.0 and saved_high == 0.0
+                and self.energy_high.value() > self.energy_low.value()
+            )
+            if not invalid_legacy_energy:
+                self.energy_low.setValue(saved_low)
+                self.energy_high.setValue(saved_high)
             mode = self.y_mode.findData(saved.get("y_mode", "counts"))
             if mode >= 0:
                 self.y_mode.setCurrentIndex(mode)
+            saved_time_column = str(saved.get("time_column", ""))
+            time_column_index = self.time_column.findText(saved_time_column, Qt.MatchFixedString)
+            if time_column_index >= 0:
+                self.time_column.setCurrentIndex(time_column_index)
+            saved_data_column = str(saved.get("data_column", "__count__"))
+            data_column_index = self.data_column.findData(saved_data_column)
+            if data_column_index >= 0:
+                self.data_column.setCurrentIndex(data_column_index)
             selected = {(str(path), int(index)) for path, index in saved.get("selected_hdus", [])}
             if selected:
                 for row in range(self.event_list.count()):
@@ -964,8 +1098,9 @@ class LightCurveWindow(QDialog):
             if (item := self.event_list.item(row)).checkState() == Qt.Checked
         ]
         saved = {
-            "time_start": config.get("time_start", -30.0),
-            "time_end": config.get("time_end", 60.0),
+            "time_start": config.get("time_start", self.time_start.value()),
+            "time_end": config.get("time_end", self.time_end.value()),
+            "time_window_mode": config.get("time_window_mode", "auto_trigger_percent"),
             "dt": config.get("dt", 0.01),
             "relative_time": config.get("relative_time", False),
             "use_gti": config.get("use_gti", False),
@@ -977,6 +1112,8 @@ class LightCurveWindow(QDialog):
             "energy_low": config.get("energy_low", 0.0),
             "energy_high": config.get("energy_high", 0.0),
             "y_mode": self.y_mode.currentData(),
+            "time_column": self.time_column.currentText(),
+            "data_column": self.data_column.currentData(),
             "selected_hdus": selected,
             "background_enabled": self.background_enabled,
             "background_windows": self.background_windows,
@@ -1060,6 +1197,7 @@ class LightCurveWindow(QDialog):
             "sources": [{"path": source_path, "hdu_indices": indices} for source_path, indices in grouped.items()],
             "time_start": self.time_start.value(),
             "time_end": self.time_end.value(),
+            "time_window_mode": "manual" if not self._auto_time_window else "auto_trigger_percent",
             "dt": self.dt.value(),
             "relative_time": self.relative_time.isChecked(),
             "use_gti": self.use_gti.isChecked(),
@@ -1073,6 +1211,8 @@ class LightCurveWindow(QDialog):
             "background_fit": self.background_enabled,
             "background_windows": list(self.background_windows),
             "background_automatic": self.background_default_intervals,
+            "time_column": self.time_column.currentText(),
+            "data_column": self.data_column.currentData(),
         }
         if (
             self.result is not None
@@ -1167,6 +1307,8 @@ class LightCurveWindow(QDialog):
                 (str(source.get("path", "")), tuple(int(index) for index in source.get("hdu_indices", [])))
                 for source in config.get("sources", [])
             ),
+            str(config.get("time_column", "TIME")).upper(),
+            str(config.get("data_column", "__count__")).upper(),
         )
 
     @Slot(str)

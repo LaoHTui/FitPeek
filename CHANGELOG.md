@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 (2026-08-22)
+
+FitPeek 0.3 extends the 0.2 light-curve workflow with a mission-aware batch
+extractor and makes event/time-column handling more tolerant of real-world FITS
+products.
+
+### Changes from 0.2
+
+- Added targeted Fermi/GBM and GECAM extraction with mission validation, recursive input discovery, mission mismatch summaries, energy presets, output estimates, cooperative cancellation, and manifest output.
+- Added Fermi and GECAM event/light-curve exports, including GECAM multi-HDU and high/low-gain detector splitting.
+- Added selectable time and numeric plot columns instead of requiring a column named exactly `TIME` and always plotting event counts.
+- Added configurable global light-curve defaults and automatic trigger-relative time windows derived from actual file coverage.
+- Added broader trigger-time discovery with source keyword reporting, plus direct `ENERGY` column range detection.
+- Improved independent analysis/extractor window behavior and preserved per-file manual settings.
+- Added automatic SHA-256 generation to the Windows build process.
+
+### Debug and reliability fixes
+
+- Fixed background fitting when background intervals lie outside the exported display range.
+- Fixed valid zero-count background windows being treated as extraction failures.
+- Fixed finite energy bands silently accepting every event when PHA channels cannot be mapped through EBOUNDS.
+- Fixed an Extractor completion/Qt thread shutdown race that could crash when a window was closed immediately after processing.
+- Fixed non-finite chart points and improved time-bound fallback for unusual FITS tables.
+- Fixed stale portable-package checksum files after rebuilding.
+- Normalized GECAM detector names without leading zeroes.
+- Expanded CI and smoke tests to cover Extractor processing, cancellation, output estimation, energy mapping, and thread cleanup.
+
 ## 0.2.0 (2026-08-19)
 
 FitPeek 0.2 is a substantial update over 0.1. It keeps the original read-only FITS inspection workflow while adding a complete quick-look light-curve analysis workflow.

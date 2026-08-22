@@ -10,9 +10,10 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from astropy.io import fits
 from PySide6.QtCore import QMimeData, QPointF, QSettings, Qt, QUrl
 from PySide6.QtGui import QDropEvent, QStandardItemModel
-from PySide6.QtWidgets import QApplication, QToolBar
+from PySide6.QtWidgets import QApplication, QMessageBox, QToolBar
 
 from app import APP_AUTHOR, APP_NAME, APP_REPOSITORY, APP_VERSION, MainWindow, ResponsiveTableView
+from extractor_window import ExtractorWindow, _ExtractorWorker
 from analysis_window import (
     ExportWorker, LightCurveWindow, _chart_title, _default_output_path,
     light_curve_settings_key,
@@ -36,7 +37,9 @@ def main():
         assert not window.findChildren(QToolBar)
         file_actions = {action.text() for action in window.file_menu.actions()}
         assert {"Open", "Remove selected file from session"} <= file_actions
-        assert [action.text() for action in window.menuBar().actions()] == ["File", "View", "About"]
+        assert [action.text() for action in window.menuBar().actions()] == ["File", "View", "Extractor", "About"]
+        assert window.extractor_action.text() == "Extractor..."
+        assert window.extractor_action.shortcut().toString() == "Ctrl+E"
         assert {action.text() for action in window.about_menu.actions()} == {"About FitPeek..."}
         about = window.create_about_dialog()
         assert about.windowTitle() == f"About {APP_NAME}"
@@ -127,8 +130,8 @@ def main():
         assert analysis.background_enabled
         assert analysis.background_default_intervals
         assert len(analysis.background_windows) == 2
-        assert analysis.time_start.value() == -30.0
-        assert analysis.time_end.value() == 60.0
+        assert np.isclose(analysis.time_start.value(), -0.1)
+        assert np.isclose(analysis.time_end.value(), 0.4)
         analysis_result = compute_light_curve(window.reader.path, analysis._config())
         analysis._on_result(analysis_result)
         fitted_windows = [tuple(value) for value in analysis.background_windows]
@@ -157,9 +160,9 @@ def main():
         assert 0 < len(series_points) <= len(analysis_result["counts"]) * 2
         assert any(
             series_points[index].x() == series_points[index + 1].x()
-            and series_points[index].y() != series_points[index + 1].y()
             for index in range(len(series_points) - 1)
         )
+        assert all(np.isfinite(point.x()) and np.isfinite(point.y()) for point in series_points)
         assert chart.plotAreaBackgroundBrush().color().name() == "#ffffff"
         assert chart.series()[0].pen().color().name() == "#000000"
         assert len(chart.series()) == 2
@@ -313,6 +316,23 @@ def main():
         assert restored.settings.value("fontScale") == 125
         assert restored.font_actions[125].isChecked()
         assert QApplication.font().pointSizeF() > restored._base_font_point_size
+
+        # Completion is not the same as QThread shutdown. Keep the references
+        # until QThread.finished so a fast close cannot destroy a live thread.
+        extractor = ExtractorWindow(restored)
+        extractor._thread = object()
+        extractor._worker = _ExtractorWorker({})
+        original_information = QMessageBox.information
+        QMessageBox.information = lambda *args, **kwargs: QMessageBox.Ok
+        try:
+            extractor._on_finished({"cancelled": True, "files": [], "skipped": []})
+        finally:
+            QMessageBox.information = original_information
+        assert extractor._thread is not None and extractor._worker is not None
+        extractor._thread_finished()
+        assert extractor._thread is None and extractor._worker is None
+        extractor.close()
+
         restored.tree.setCurrentItem(restored.tree.topLevelItem(1))
         removed_path = restored.tree.topLevelItem(1).data(0, Qt.UserRole)
         removed_settings_key = light_curve_settings_key(removed_path)

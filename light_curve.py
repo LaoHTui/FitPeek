@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import astropy
 from astropy.io import fits
+from fits_reader import resolve_trigger_time
 
 from app_info import APP_NAME, APP_VERSION
 
@@ -37,6 +38,7 @@ def compute_light_curve(path, config, cancelled=lambda: False, progress=lambda v
     paths = _normalise_paths(path, config)
     progress(2, "Opening FITS file...")
     event_parts = []
+    value_parts = []
     fit_event_parts = []
     source_counts = {}
     resolved_background_windows = []
@@ -49,11 +51,12 @@ def compute_light_curve(path, config, cancelled=lambda: False, progress=lambda v
         source_path = Path(source["path"])
         indices = [int(index) for index in source.get("hdu_indices", [])]
         with fits.open(source_path, mode="readonly", memmap=not str(source_path).lower().endswith(".gz")) as hdul:
-            current_trigtime = next((hdu.header.get("TRIGTIME") for hdu in hdul if hdu.header.get("TRIGTIME") is not None), None)
+            trigger_info = resolve_trigger_time(hdul)
+            current_trigtime = trigger_info.get("value")
             if trigtime is None:
                 trigtime = current_trigtime
             if config.get("relative_time") and current_trigtime is None:
-                raise ValueError(f"{source_path.name} has no TRIGTIME and cannot be combined in relative-time mode")
+                raise ValueError(f"{source_path.name} has no trigger time (TRIGTIME/TSTART-TSTOP fallback) and cannot be combined in relative-time mode")
             relative_time = bool(config.get("relative_time") and current_trigtime is not None)
             time_offset = float(current_trigtime) if relative_time else 0.0
             allowed_channels = _allowed_channels(hdul, config)
@@ -68,9 +71,12 @@ def compute_light_curve(path, config, cancelled=lambda: False, progress=lambda v
                 data = getattr(hdu, "data", None)
                 names = list(getattr(data, "names", []) or [])
                 lookup = {name.upper(): name for name in names}
-                if data is None or "TIME" not in lookup:
+                time_key = str(config.get("time_column") or "TIME").upper()
+                if time_key not in lookup:
+                    time_key = _find_time_column(lookup)
+                if data is None or time_key is None:
                     continue
-                time_values = np.asarray(data[lookup["TIME"]], dtype=np.float64) - time_offset
+                time_values = np.asarray(data[lookup[time_key]], dtype=np.float64) - time_offset
                 mask = np.isfinite(time_values)
                 finite_times = np.asarray(time_values[mask], dtype=np.float64)
                 if finite_times.size:
@@ -114,22 +120,53 @@ def compute_light_curve(path, config, cancelled=lambda: False, progress=lambda v
 
                 selected_mask = mask & (time_values >= start) & (time_values < effective_end)
                 selected = np.asarray(time_values[selected_mask], dtype=np.float64)
+                data_column = str(config.get("data_column") or "__count__")
+                if data_column == "__count__":
+                    selected_values = np.ones(selected.shape, dtype=np.float64)
+                elif data_column.upper() in lookup:
+                    selected_values = np.asarray(data[lookup[data_column.upper()]], dtype=np.float64)[selected_mask]
+                    finite_values = np.isfinite(selected_values)
+                    selected = selected[finite_values]
+                    selected_values = selected_values[finite_values]
+                else:
+                    raise ValueError(f"Selected plot column {data_column!r} is not present in {source_path.name}:{hdu.name}")
                 event_parts.append(selected)
+                value_parts.append(selected_values)
                 source_counts[f"{source_path.name}:{getattr(hdu, 'name', index)}"] = int(selected.size)
                 if config.get("background_fit") and source_windows:
                     fit_mask = selected_mask.copy()
                     for window_start, window_end in source_windows:
                         fit_mask |= mask & (time_values >= window_start) & (time_values < window_end)
-                    fit_event_parts.append(np.asarray(time_values[fit_mask], dtype=np.float64))
+                    fit_times = np.asarray(time_values[fit_mask], dtype=np.float64)
+                    if data_column == "__count__":
+                        fit_values = np.ones(fit_times.shape, dtype=np.float64)
+                    else:
+                        fit_values = np.asarray(data[lookup[data_column.upper()]], dtype=np.float64)[fit_mask]
+                        valid = np.isfinite(fit_values)
+                        fit_times, fit_values = fit_times[valid], fit_values[valid]
+                    fit_event_parts.append((fit_times, fit_values))
                 progress(5 + int(65 * (source_position + 1) / total_sources), f"Filtering {source_path.name}:{hdu.name}...")
 
     if cancelled():
         raise AnalysisCancelled("Cancelled")
-    events = np.sort(np.concatenate(event_parts)) if event_parts else np.empty(0, dtype=np.float64)
+    if event_parts:
+        raw_events = np.concatenate(event_parts)
+        values = np.concatenate(value_parts)
+        order = np.argsort(raw_events, kind="mergesort")
+        events = raw_events[order]
+        values = values[order]
+    else:
+        events = np.empty(0, dtype=np.float64)
+        values = np.empty(0, dtype=np.float64)
     edges = start + np.arange(bin_count + 1, dtype=np.float64) * dt
-    counts, _ = np.histogram(events, bins=edges)
+    if config.get("data_column", "__count__") == "__count__":
+        counts, _ = np.histogram(events, bins=edges)
+        count_error = np.sqrt(counts.astype(np.float64))
+    else:
+        counts, _ = np.histogram(events, bins=edges, weights=values)
+        value_squares, _ = np.histogram(events, bins=edges, weights=values ** 2)
+        count_error = np.sqrt(np.maximum(value_squares, 0.0))
     centers = 0.5 * (edges[:-1] + edges[1:])
-    count_error = np.sqrt(counts.astype(np.float64))
     rate = counts.astype(np.float64) / dt
     rate_error = count_error / dt
     progress(82, "Fitting background...")
@@ -150,11 +187,15 @@ def compute_light_curve(path, config, cancelled=lambda: False, progress=lambda v
                 window_edges = _window_edges(segment_start, segment_end, dt)
                 if len(window_edges) < 2:
                     continue
-                window_events = np.concatenate([
-                    values[(values >= segment_start) & (values < segment_end)] for values in fit_event_parts
-                    if values.size
+                window_times = np.concatenate([
+                    pair[0][(pair[0] >= segment_start) & (pair[0] < segment_end)] for pair in fit_event_parts
+                    if pair[0].size
                 ]) if fit_event_parts else np.empty(0, dtype=np.float64)
-                window_counts, _ = np.histogram(window_events, bins=window_edges)
+                window_values = np.concatenate([
+                    pair[1][(pair[0] >= segment_start) & (pair[0] < segment_end)] for pair in fit_event_parts
+                    if pair[0].size
+                ]) if fit_event_parts else np.empty(0, dtype=np.float64)
+                window_counts, _ = np.histogram(window_times, bins=window_edges, weights=window_values)
                 fit_centers_parts.append(0.5 * (window_edges[:-1] + window_edges[1:]))
                 fit_counts_parts.append(window_counts.astype(np.float64))
         if fit_centers_parts:
@@ -183,6 +224,7 @@ def compute_light_curve(path, config, cancelled=lambda: False, progress=lambda v
         "net_rate_error": background["net_rate_error"],
         "background_fit": background["fit"],
         "source_counts": source_counts,
+        "data_column": config.get("data_column", "__count__"),
         "trigtime": trigtime,
         "relative_time": relative_time,
         "effective_time_start": start,
@@ -512,6 +554,15 @@ def _first_header_value(hdul, *keywords):
             if value not in (None, ""):
                 return str(value).strip()
     return ""
+
+
+def _find_time_column(lookup):
+    if "TIME" in lookup:
+        return "TIME"
+    for name in lookup:
+        if "TIME" in name and not any(token in name for token in ("ERROR", "ERR", "STOP", "START")):
+            return name
+    return None
 
 
 def _unique_nonempty(values):

@@ -20,6 +20,66 @@ except Exception:  # pragma: no cover - exercised only without astropy
     fits = None  # type: ignore[assignment]
 
 
+TRIGGER_KEYWORDS = (
+    "TRIGTIME", "BST_TIME", "BURST_TIME", "TRIGGER_TIME",
+    "TRIGGER", "GRB_TIME", "BURSTTIM", "T0",
+)
+_TRIGGER_EXCLUDED_NUMERIC_KEYS = {
+    "BITPIX", "EXTVER", "EXPOSURE", "LIVETIME", "MJDREF",
+    "MJDREFI", "MJDREFF", "NAXIS", "PCOUNT", "GCOUNT",
+    "TELAPSE", "TIMEDEL", "TIMEPIXR", "TIMEZERO", "TZERO",
+}
+
+
+def resolve_trigger_time(hdul: Any) -> dict[str, Any]:
+    """Resolve a trigger time while preserving the original header location."""
+    explicit = []
+    numeric = []
+    bounds = []
+    rank = {key: position for position, key in enumerate(TRIGGER_KEYWORDS)}
+    for index, hdu in enumerate(hdul or []):
+        header = getattr(hdu, "header", None)
+        if header is None:
+            continue
+        for key in header:
+            upper = str(key).upper().strip()
+            try:
+                value = float(header[key])
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(value):
+                continue
+            if upper in {"TSTART", "TSTOP", "TEND"}:
+                bounds.append(value)
+                continue
+            comment = str(header.comments[key] or "").lower()
+            trigger_hint = (
+                upper in rank or "TRIG" in upper or upper.startswith("BST")
+                or "trigger time" in comment or "burst time" in comment
+            )
+            if trigger_hint:
+                explicit.append((rank.get(upper, len(rank)), upper, index, value))
+            elif (
+                upper not in _TRIGGER_EXCLUDED_NUMERIC_KEYS
+                and not upper.startswith(("NAXIS", "TFORM", "TTYPE", "TUNIT", "TLMIN", "TLMAX"))
+            ):
+                numeric.append((value, upper, index))
+    if explicit:
+        _, key, index, value = min(explicit)
+        return {"value": value, "keyword": key, "hdu_index": index, "method": "explicit keyword"}
+    if len(bounds) >= 2:
+        lo, hi = min(bounds), max(bounds)
+        midpoint = (lo + hi) / 2.0
+        inside = [item for item in numeric if lo <= item[0] <= hi]
+        if inside:
+            value, key, index = min(inside, key=lambda item: abs(item[0] - midpoint))
+            return {
+                "value": value, "keyword": key, "hdu_index": index,
+                "method": "nearest numeric value to TSTART/TSTOP midpoint",
+            }
+    return {"value": None, "keyword": None, "hdu_index": None, "method": "not found"}
+
+
 @dataclass
 class HeaderCard:
     key: str
@@ -246,6 +306,25 @@ class FITSReader:
     def table_schema(self, hdu_index: int) -> list[TableField]:
         return self._infos[hdu_index].fields if 0 <= hdu_index < len(self._infos) else []
 
+    def table_column_bounds(self, hdu_index: int, column_name: str) -> tuple[float, float] | None:
+        """Return finite numeric bounds for one table column without copying rows."""
+        if self._hdulist is None or not (0 <= hdu_index < len(self._hdulist)):
+            return None
+        hdu = self._hdulist[hdu_index]
+        data = getattr(hdu, "data", None)
+        names = list(getattr(getattr(hdu, "columns", None), "names", []) or [])
+        match = next((name for name in names if str(name).upper() == str(column_name).upper()), None)
+        if data is None or match is None:
+            return None
+        try:
+            values = np.asarray(data[match], dtype=float)
+            finite = values[np.isfinite(values)]
+            if finite.size == 0:
+                return None
+            return float(np.min(finite)), float(np.max(finite))
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+
     def table_columns(self, hdu_index: int) -> list[dict[str, Any]]:
         """Return serialisable field dictionaries for a QTableWidget."""
         result = []
@@ -295,10 +374,25 @@ class FITSReader:
             "Instrument": self.header_value("INSTRUME", ""),
             "Object": self.header_value("OBJECT", ""),
             "Time system": self.header_value("TIMESYS", ""),
-            "Trigger time": self.header_value("TRIGTIME", ""),
+            "Trigger time": self.trigger_time_info().get("value", ""),
+            "Trigger time source": self._trigger_summary_text(),
             "RA (deg)": self.header_value("RA_OBJ", ""),
             "DEC (deg)": self.header_value("DEC_OBJ", ""),
         }
+
+    def trigger_time_info(self) -> dict[str, Any]:
+        """Resolve trigger time and retain its original FITS keyword/location.
+
+        Explicit trigger-like keywords win.  When absent, numeric header values
+        nearest the TSTART/TSTOP midpoint are used as a conservative fallback.
+        """
+        return resolve_trigger_time(self._hdulist)
+
+    def _trigger_summary_text(self) -> str:
+        info = self.trigger_time_info()
+        if info.get("value") is None:
+            return "not found (relative time disabled)"
+        return f"{info.get('keyword')} in HDU {info.get('hdu_index')} ({info.get('method')})"
 
     def read_table_rows(self, hdu_index: int, start: int = 0, count: int = 100) -> list[tuple[Any, ...]]:
         """Read only ``count`` rows from a table HDU.
@@ -339,7 +433,7 @@ class FITSReader:
     def read_rows(self, hdu_index: int, start: int = 0, count: int = 100) -> list[tuple[Any, ...]]:
         return self.read_table_rows(hdu_index, start, count)
 
-    def time_bounds(self, hdu_indices=None, relative_to_trigtime=False):
+    def time_bounds(self, hdu_indices=None, relative_to_trigtime=False, time_column="TIME"):
         """Return the finite TIME bounds across selected event HDUs."""
         if self._hdulist is None and self.open_error is None:
             self.load()
@@ -350,18 +444,36 @@ class FITSReader:
                 continue
             data = getattr(self._hdulist[index], "data", None)
             names = {str(name).upper(): name for name in (getattr(data, "names", []) or [])}
-            if data is None or "TIME" not in names:
+            column = str(time_column or "TIME").upper()
+            if data is None or column not in names:
                 continue
-            times = np.asarray(data[names["TIME"]], dtype=np.float64)
+            times = np.asarray(data[names[column]], dtype=np.float64)
             times = times[np.isfinite(times)]
             if times.size:
                 values.append((float(np.min(times)), float(np.max(times))))
         if not values:
-            return None
+            header_bounds = []
+            for index in indices:
+                if index < 0 or index >= len(self._hdulist or []):
+                    continue
+                header = getattr(self._hdulist[index], "header", None)
+                if header is None:
+                    continue
+                start = header.get("TSTART")
+                stop = header.get("TSTOP", header.get("TEND"))
+                try:
+                    start, stop = float(start), float(stop)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(start) and np.isfinite(stop) and start < stop:
+                    header_bounds.append((start, stop))
+            if not header_bounds:
+                return None
+            values = header_bounds
         start = min(value[0] for value in values)
         end = max(value[1] for value in values)
         if relative_to_trigtime:
-            trigtime = next((hdu.header.get("TRIGTIME") for hdu in self._hdulist if hdu.header.get("TRIGTIME") is not None), None)
+            trigtime = self.trigger_time_info().get("value")
             if trigtime is not None:
                 start -= float(trigtime)
                 end -= float(trigtime)
@@ -397,4 +509,4 @@ class FITSReader:
 
 FitsReader = FITSReader
 
-__all__ = ["FITSReader", "FitsReader", "HDUInfo", "HeaderCard", "TableField"]
+__all__ = ["FITSReader", "FitsReader", "HDUInfo", "HeaderCard", "TableField", "resolve_trigger_time"]

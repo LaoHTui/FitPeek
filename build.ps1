@@ -58,8 +58,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
     $distDir = Join-Path $root 'dist\FitPeek'
     Copy-Item (Join-Path $root 'Register-FitPeek.ps1'), (Join-Path $root 'Bind-FitPeek.cmd'), (Join-Path $root 'README.txt') -Destination $distDir -Force
-    if (Test-Path 'FitPeek_Portable.zip') { Remove-Item 'FitPeek_Portable.zip' -Force }
-    Compress-Archive -Path (Join-Path $distDir '*') -DestinationPath (Join-Path $root 'FitPeek_Portable.zip')
+    $zipPath = Join-Path $root 'FitPeek_Portable.zip'
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+    Compress-Archive -Path (Join-Path $distDir '*') -DestinationPath $zipPath
+    $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath "$zipPath.sha256" -Value "$zipHash  FitPeek_Portable.zip" -Encoding ascii
 
     # Also refresh the standalone executable kept at dist\FitPeek.exe.
     & $python -m PyInstaller --noconfirm --clean --onefile --windowed --name FitPeek `

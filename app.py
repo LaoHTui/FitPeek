@@ -7,7 +7,7 @@ from PySide6.QtCore import QSettings, Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFrame, QGridLayout, QHeaderView,
+    QCheckBox, QDoubleSpinBox, QFrame, QFormLayout, QGridLayout, QHeaderView,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QPushButton, QSpinBox, QSplitter, QStatusBar, QStyle, QTabWidget, QTableView,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
@@ -147,6 +147,76 @@ class AboutDialog(QDialog):
         root.addWidget(buttons)
 
 
+class LightCurveDefaultsDialog(QDialog):
+    """Edit global defaults used when a new light-curve window is opened."""
+
+    DEFAULTS = {
+        "pre_trigger_percent": 10.0,
+        "post_trigger_percent": 40.0,
+        "dt": 0.01,
+        "relative_time": True,
+        "use_gti": True,
+        "apply_energy": True,
+        "background_fit": True,
+        "y_mode": "counts",
+    }
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Light Curve Defaults")
+        self.setMinimumWidth(430)
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self.pre = QDoubleSpinBox(); self.pre.setRange(0, 100); self.pre.setDecimals(2); self.pre.setSuffix(" %")
+        self.post = QDoubleSpinBox(); self.post.setRange(0, 100); self.post.setDecimals(2); self.post.setSuffix(" %")
+        self.dt = QDoubleSpinBox(); self.dt.setRange(1e-6, 1e9); self.dt.setDecimals(6); self.dt.setValue(0.01); self.dt.setSuffix(" s")
+        self.relative = QCheckBox("Use trigger-relative time when available")
+        self.gti = QCheckBox("Apply GTI when available")
+        self.energy = QCheckBox("Enable energy filter when a range is available")
+        self.background = QCheckBox("Fit linear background automatically")
+        self.y_mode = QComboBox(); self.y_mode.addItem("Counts / bin", "counts"); self.y_mode.addItem("Count rate / s", "rate")
+        form.addRow("Before trigger", self.pre); form.addRow("After trigger", self.post); form.addRow("Default bin width", self.dt)
+        form.addRow("Preview Y", self.y_mode)
+        root.addLayout(form)
+        for box in (self.relative, self.gti, self.energy, self.background): root.addWidget(box)
+        note = QLabel("The percentages use the full relative observation span and are clamped to available data. File-specific manual settings remain unchanged.")
+        note.setWordWrap(True); note.setStyleSheet("color:#64748b;"); root.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.RestoreDefaults | QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject); buttons.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self._restore)
+        root.addWidget(buttons)
+        self._restore()
+        self._load()
+
+    def _value(self, key):
+        value = self.settings.value(f"lightCurveDefaults/{key}", self.DEFAULTS[key])
+        if isinstance(self.DEFAULTS[key], bool): return str(value).lower() in ("1", "true", "yes", "on")
+        if isinstance(self.DEFAULTS[key], float):
+            try: return float(value)
+            except (TypeError, ValueError): return self.DEFAULTS[key]
+        return value
+
+    def _load(self):
+        self.pre.setValue(max(0, min(100, self._value("pre_trigger_percent"))))
+        self.post.setValue(max(0, min(100, self._value("post_trigger_percent"))))
+        self.dt.setValue(max(1e-6, self._value("dt")))
+        self.relative.setChecked(self._value("relative_time")); self.gti.setChecked(self._value("use_gti")); self.energy.setChecked(self._value("apply_energy")); self.background.setChecked(self._value("background_fit"))
+        index = self.y_mode.findData(self._value("y_mode")); self.y_mode.setCurrentIndex(max(0, index))
+
+    def _restore(self):
+        self.pre.setValue(self.DEFAULTS["pre_trigger_percent"]); self.post.setValue(self.DEFAULTS["post_trigger_percent"]); self.dt.setValue(self.DEFAULTS["dt"])
+        self.relative.setChecked(self.DEFAULTS["relative_time"]); self.gti.setChecked(self.DEFAULTS["use_gti"]); self.energy.setChecked(self.DEFAULTS["apply_energy"]); self.background.setChecked(self.DEFAULTS["background_fit"])
+        self.y_mode.setCurrentIndex(self.y_mode.findData(self.DEFAULTS["y_mode"]))
+
+    def _accept(self):
+        if self.pre.value() + self.post.value() <= 0 or self.dt.value() <= 0:
+            QMessageBox.warning(self, "Invalid defaults", "Trigger percentages must define a non-empty window and DT must be positive.")
+            return
+        values = {"pre_trigger_percent": self.pre.value(), "post_trigger_percent": self.post.value(), "dt": self.dt.value(), "relative_time": self.relative.isChecked(), "use_gti": self.gti.isChecked(), "apply_energy": self.energy.isChecked(), "background_fit": self.background.isChecked(), "y_mode": self.y_mode.currentData()}
+        for key, value in values.items(): self.settings.setValue(f"lightCurveDefaults/{key}", value)
+        self.settings.sync(); self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_paths=None, settings=None):
         super().__init__()
@@ -174,6 +244,7 @@ class MainWindow(QMainWindow):
         self.science_loaded_for = None
         self.analysis_windows = []
         self.header_windows = []
+        self.extractor_windows = []
         self._analysis_serial = 0
         self.setAcceptDrops(True)
         self._build_ui()
@@ -200,6 +271,9 @@ class MainWindow(QMainWindow):
         light_curve_action.setShortcut("Ctrl+L")
         light_curve_action.triggered.connect(self.open_light_curve)
         self.view_menu.addAction(light_curve_action)
+        defaults_action = QAction("Light Curve Defaults...", self)
+        defaults_action.triggered.connect(self.open_light_curve_defaults)
+        self.view_menu.addAction(defaults_action)
         compare_headers_action = QAction("Compare FITS Headers...", self)
         compare_headers_action.triggered.connect(self.open_header_compare)
         self.view_menu.addAction(compare_headers_action)
@@ -229,6 +303,12 @@ class MainWindow(QMainWindow):
             self.font_menu.addAction(action)
             self.font_actions[scale] = action
         self.font_actions[self.font_scale].setChecked(True)
+
+        self.extractor_action = QAction("Extractor...", self)
+        self.extractor_action.setShortcut("Ctrl+E")
+        self.extractor_action.triggered.connect(self.open_extractor)
+        self.extractor_menu = self.menuBar().addMenu("Extractor")
+        self.extractor_menu.addAction(self.extractor_action)
 
         self.about_menu = self.menuBar().addMenu("About")
         about_action = QAction("About FitPeek...", self)
@@ -419,6 +499,27 @@ class MainWindow(QMainWindow):
 
     def show_about(self, _checked=False):
         self.create_about_dialog().exec()
+
+    def open_light_curve_defaults(self, _checked=False):
+        LightCurveDefaultsDialog(self.settings, self).exec()
+
+    def open_extractor(self, _checked=False):
+        from extractor_window import ExtractorWindow
+
+        loaded_paths = list(self.roots.keys())
+        window = ExtractorWindow(self, initial_paths=loaded_paths)
+        self.extractor_windows.append(window)
+        window.destroyed.connect(
+            lambda _object=None, current=window: self.extractor_windows.remove(current)
+            if current in self.extractor_windows else None
+        )
+        origin = self.frameGeometry().topLeft()
+        offset = 28 * ((len(self.extractor_windows) - 1) % 8)
+        window.move(origin.x() + 80 + offset, origin.y() + 70 + offset)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        return window
 
     def open_light_curve(self):
         if not self.reader:
@@ -770,6 +871,11 @@ class MainWindow(QMainWindow):
         self.settings.sync()
 
     def closeEvent(self, event):
+        busy_extractors = [window for window in self.extractor_windows if window._thread and window._thread.isRunning()]
+        if busy_extractors:
+            QMessageBox.information(self, "Extraction in progress", "Wait for the current extraction to finish before closing FitPeek.")
+            event.ignore()
+            return
         busy_exports = [window for window in self.analysis_windows if window.export_thread is not None]
         if busy_exports:
             QMessageBox.information(self, "Save in progress", "Wait for light curve exports to finish before closing FitPeek.")
@@ -782,6 +888,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Analysis in progress", "Cancellation requested. Close FitPeek after the analysis stops.")
             event.ignore()
             return
+        for window in list(self.extractor_windows) + list(self.analysis_windows) + list(self.header_windows):
+            window.close()
         self.save_session()
         for reader in self.readers.values():
             reader.close()
